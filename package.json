@@ -4,15 +4,12 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "dev:server": "tsx watch server/index.ts",
-    "dev:all": "concurrently \"npm run dev\" \"npm run dev:server\"",
-    "start:server": "tsx server/index.ts",
-    "build": "vite build",
-    "lint": "eslint .",
-    "preview": "vite preview",
-    "typecheck": "tsc --noEmit -p tsconfig.app.json"
-  },
+  "dev": "vite",
+  "dev:server": "tsx watch server/index.ts",
+  "dev:all": "concurrently \"npm run dev\" \"npm run dev:server\"",
+  "start": "tsx server/index.ts",
+  "build": "vite build"
+},
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "@supabase/supabase-js": "^2.57.4",
