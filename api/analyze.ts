@@ -15,7 +15,7 @@
 import type { IncomingMessage } from 'http';
 import Busboy from 'busboy';
 import pdfParse from 'pdf-parse';
-import { analyzeDocument } from '../server/utils/gemini';
+import { analyzeDocument } from '../server/utils/gemini.js';
 
 function parseMultipart(req: IncomingMessage): Promise<{ fileBuffer: Buffer; fileName: string | null }> {
   return new Promise((resolve, reject) => {
