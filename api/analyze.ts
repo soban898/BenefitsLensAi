@@ -2,72 +2,39 @@
   api/analyze.ts
   Vercel Serverless Function replacing Express POST /api/analyze.
 
-  Improvements:
-  - Uses the Web Request API (req.formData()) when available on Vercel to parse multipart/form-data in-memory.
-  - Falls back to busboy if req.formData is not available (handles older runtimes).
-  - Extracts text from PDF using pdf-parse and calls analyzeDocument from server/utils/gemini.js
-  - Returns the same JSON shape as the original Express controller.
+  Simplified to rely solely on the Web Request API (req.formData()), which is
+  supported by Vercel serverless runtimes. The Busboy fallback has been removed
+  to avoid runtime inconsistencies and to keep the function minimal.
 
-  Notes:
-  - This removes reliance on Busboy when possible and resolves the "Busboy is not a constructor" runtime error.
-  - Keeps uploads in memory (Buffer) to be compatible with Vercel serverless.
+  - Parses multipart/form-data using req.formData() (in-memory).
+  - Extracts text from PDF using pdf-parse.
+  - Calls analyzeDocument(...) from server/utils/gemini.js (prompts unchanged).
+  - Returns the same JSON shape as the original Express controller.
 */
 
-import type { IncomingMessage } from 'http';
 import pdfParse from 'pdf-parse/lib/pdf-parse.js';
 import { analyzeDocument } from '../server/utils/gemini.js';
 
 async function parseMultipart(req: any): Promise<{ fileBuffer: Buffer; fileName: string | null }> {
-  // Prefer the Web Request API (available in Vercel runtimes) which exposes formData()
-  if (typeof req.formData === 'function') {
-    const formData = await req.formData();
-    const file = formData.get('document') as any;
-    if (!file) {
-      throw new Error('No file uploaded');
-    }
-    // file implements the File interface (has arrayBuffer and name)
-    const arrayBuffer = await file.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-    const fileName = file.name || null;
-    return { fileBuffer: buffer, fileName };
+  if (typeof req.formData !== 'function') {
+    // Explicit error — this function requires the Vercel runtime (or other runtimes
+    // that implement the Web Request API). We intentionally do not provide a
+    // fallback parser to avoid Busboy inconsistencies.
+    throw new Error('Multipart parsing is not supported in this environment. Use the Vercel runtime.');
   }
 
-  // Fallback to Busboy for environments without formData(). Use dynamic import to avoid bundling issues.
-  const BusboyModule = await import('busboy');
-  // busboy v1.x exports a default function; handle both shapes.
-  const busboyFactory = (BusboyModule && (BusboyModule.default ?? BusboyModule)) as any;
+  const formData = await req.formData();
+  const file = formData.get('document') as any;
 
-  return await new Promise((resolve, reject) => {
-    try {
-      const bb = typeof busboyFactory === 'function' ? busboyFactory({ headers: req.headers }) : new busboyFactory({ headers: req.headers });
+  if (!file) {
+    throw new Error('No file uploaded');
+  }
 
-      let fileBuffer = Buffer.alloc(0);
-      let fileName: string | null = null;
-      let fileSeen = false;
+  const arrayBuffer = await file.arrayBuffer();
+  const buffer = Buffer.from(arrayBuffer);
+  const fileName = file.name || null;
 
-      bb.on('file', (_fieldname: any, file: any, info: any) => {
-        fileSeen = true;
-        fileName = info?.filename || null;
-        file.on('data', (data: Buffer) => {
-          fileBuffer = Buffer.concat([fileBuffer, data]);
-        });
-        file.on('end', () => {
-          // file finished
-        });
-      });
-
-      bb.on('error', (err: any) => reject(err));
-      bb.on('finish', () => {
-        if (!fileSeen) return reject(new Error('No file uploaded'));
-        resolve({ fileBuffer, fileName });
-      });
-
-      // In Node.js serverless handler, req is a Node IncomingMessage
-      (req as IncomingMessage).pipe(bb);
-    } catch (err) {
-      reject(err);
-    }
-  });
+  return { fileBuffer: buffer, fileName };
 }
 
 export default async function handler(req: any, res: any) {
@@ -102,7 +69,7 @@ export default async function handler(req: any, res: any) {
     if (err?.message && err.message.includes('API key')) {
       return res.status(500).json({ error: 'Gemini AI service is not configured. Check GEMINI_API_KEY.' });
     }
-    if (err?.message && err.message.includes('No file uploaded')) {
+    if (err?.message && (err.message.includes('No file uploaded') || err.message.includes('Multipart parsing'))) {
       return res.status(400).json({ error: err.message });
     }
     res.status(500).json({ error: err?.message || 'Failed to analyze document' });
