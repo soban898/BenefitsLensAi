@@ -1,147 +1,141 @@
-/*
-  api/analyze.ts
+// api/analyze.ts
+// Vercel Node.js Serverless Function (Node runtime)
+// - Uses the current formidable API to parse multipart/form-data on Node
+// - Keeps the uploaded PDF entirely in memory
+// - Extracts text using pdf-parse
+// - Calls analyzeDocument(...) from server/utils/gemini.ts
+// - Returns { analysis, extractedText, fileName, pageCount }
 
-  Vercel Node.js Serverless Function (Node runtime, NOT Edge).
-
-  This implementation:
-  - Uses the Node-style handler: export default async function handler(req, res)
-  - Parses multipart/form-data using formidable (server-side parser that works in Vercel Node functions)
-  - Keeps the uploaded PDF entirely in memory (no disk writes)
-  - Extracts text with pdf-parse (stable entrypoint)
-  - Reuses analyzeDocument(...) from server/utils/gemini.js
-  - Returns the same response shape: { analysis, extractedText, fileName, pageCount }
-
-  Error codes:
-  - 400: missing file or invalid PDF
-  - 500: Gemini errors or unexpected server errors
-*/
-
-import { IncomingMessage } from 'http';
+import type { IncomingMessage, ServerResponse } from 'http';
 import { PassThrough } from 'stream';
-import { IncomingForm, File as FormidableFile } from 'formidable';
+import { formidable, File, Files } from 'formidable';
 import pdfParse from 'pdf-parse';
 import { analyzeDocument } from '../server/utils/gemini.js';
 
-const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
+const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20 MB
 
-function parseMultipartNode(req: IncomingMessage): Promise<{ fileBuffer: Buffer; fileName: string | null }> {
+async function parseMultipart(req: IncomingMessage): Promise<{ fileBuffer: Buffer; fileName: string | null }> {
   return new Promise((resolve, reject) => {
-    const fileBuffers = new Map<string, Buffer>();
+    const buffers = new Map<string, Buffer>();
 
-    const form = new IncomingForm({
+    const form = formidable({
       maxFileSize: MAX_FILE_SIZE,
       multiples: false,
-      // Provide a write stream handler that accumulates the file in memory
-      fileWriteStreamHandler: (file: FormidableFile) => {
+      // Use the write stream handler to collect file data in memory
+      fileWriteStreamHandler: (file: File) => {
         const pass = new PassThrough();
         const chunks: Buffer[] = [];
         pass.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
         pass.on('end', () => {
-          const name = (file.originalFilename || file.newFilename || file.newFilename || 'file') as string;
+          const key = file.originalFilename ?? file.newFilename ?? file.newFilename ?? 'file';
           try {
-            fileBuffers.set(name, Buffer.concat(chunks));
+            buffers.set(key, Buffer.concat(chunks));
           } catch (err) {
-            // ignore
+            // If buffer concat fails, we will handle missing buffer later
           }
         });
         return pass;
       },
     });
 
-    form.parse(req, (err, _fields, files) => {
+    form.parse(req, (err, _fields, files: Files) => {
       if (err) {
         return reject(err);
       }
 
-      // files is an object keyed by field name; we expect a single file field named 'document'
-      const fileField = Object.keys(files)[0];
-      if (!fileField) {
+      // Prefer field named 'document', otherwise pick the first file available
+      let fileEntry: File | undefined;
+
+      const documentField = files['document'];
+      if (documentField) {
+        fileEntry = Array.isArray(documentField) ? documentField[0] : documentField;
+      } else {
+        const keys = Object.keys(files);
+        if (keys.length === 0) {
+          return reject(new Error('No file uploaded'));
+        }
+        const first = files[keys[0]];
+        fileEntry = Array.isArray(first) ? first[0] : first;
+      }
+
+      if (!fileEntry) {
         return reject(new Error('No file uploaded'));
       }
 
-      const fileObj: any = (files as any)[fileField];
-
-      // Formidable may represent single file as an object or array
-      const fileEntry = Array.isArray(fileObj) ? fileObj[0] : fileObj;
-
-      const name = fileEntry?.originalFilename || fileEntry?.newFilename || fileEntry?.filename || fileEntry?.name || null;
-
-      // Find buffer by name; if not present, fall back to the first buffer stored
-      let buffer: Buffer | undefined = undefined;
-      if (name && fileBuffers.has(name)) {
-        buffer = fileBuffers.get(name);
-      } else if (fileBuffers.size > 0) {
-        buffer = Array.from(fileBuffers.values())[0];
-      }
+      const key = fileEntry.originalFilename ?? fileEntry.newFilename ?? fileEntry.newFilename ?? 'file';
+      const buffer = buffers.get(key) ?? Array.from(buffers.values())[0];
 
       if (!buffer || buffer.length === 0) {
         return reject(new Error('No file uploaded or file is empty'));
       }
 
-      resolve({ fileBuffer: buffer, fileName: name });
+      const fileName = fileEntry.originalFilename ?? fileEntry.newFilename ?? null;
+      resolve({ fileBuffer: buffer, fileName });
     });
   });
 }
 
-export default async function handler(req: any, res: any) {
-  // Vercel Node.js Serverless Function signature
+export default async function handler(req: IncomingMessage, res: ServerResponse) {
   if (req.method !== 'POST') {
-    res.status(405).json({ error: 'Method not allowed' });
+    res.writeHead(405, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Method not allowed' }));
     return;
   }
 
   try {
-    const { fileBuffer, fileName } = await parseMultipartNode(req as IncomingMessage);
+    const { fileBuffer, fileName } = await parseMultipart(req);
 
     if (!fileBuffer || fileBuffer.length === 0) {
-      res.status(400).json({ error: 'No file uploaded or empty file' });
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'No file uploaded or empty file' }));
       return;
     }
 
-    // Parse PDF in-memory
     let pdfData: any;
     try {
-      pdfData = await pdfParse(fileBuffer as Buffer);
-    } catch (err: any) {
+      pdfData = await pdfParse(fileBuffer);
+    } catch (err) {
       console.error('pdf-parse error', err);
-      res.status(400).json({ error: 'Failed to parse PDF. The file may be corrupted or not a valid PDF.' });
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Failed to parse PDF. The file may be corrupted or not a valid PDF.' }));
       return;
     }
 
-    if (!pdfData?.text || pdfData.text.trim().length === 0) {
-      res.status(400).json({ error: 'No text could be extracted from this PDF. It may be a scanned image or contain embedded images only.' });
+    if (!pdfData?.text || String(pdfData.text).trim().length === 0) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'No text could be extracted from this PDF. It may be a scanned image or contain images only.' }));
       return;
     }
 
-    // Call the existing analyzeDocument function
-    let analysis: any;
+    let analysis: unknown;
     try {
-      analysis = await analyzeDocument(pdfData.text as string);
+      analysis = await analyzeDocument(String(pdfData.text));
     } catch (err: any) {
-      console.error('analyzeDocument (Gemini) error', err);
-      // If the error mentions API key, return 500 with a helpful message
-      if (err?.message && err.message.includes('API key')) {
-        res.status(500).json({ error: 'Gemini AI service is not configured. Check GEMINI_API_KEY.' });
+      console.error('analyzeDocument error', err);
+      if (err?.message && typeof err.message === 'string' && err.message.includes('API key')) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Gemini AI service is not configured. Check GEMINI_API_KEY.' }));
         return;
       }
-      // Other Gemini-related errors
-      res.status(500).json({ error: err?.message || 'Failed to analyze document' });
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err?.message || 'Failed to analyze document' }));
       return;
     }
 
-    res.status(200).json({
+    const responseBody = {
       analysis,
       extractedText: pdfData.text,
-      fileName: fileName || null,
-      pageCount: (pdfData as any).numpages || 1,
-    });
+      fileName: fileName ?? null,
+      pageCount: (pdfData as any).numpages ?? 1,
+    };
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(responseBody));
   } catch (err: any) {
-    console.error('analyze handler error', err);
-    // Distinguish known errors
-    if (err?.message && (err.message.includes('No file uploaded') || err.message.includes('file is empty') || err.message.includes('Multipart parsing'))) {
-      res.status(400).json({ error: err.message });
-      return;
-    }
-    res.status(500).json({ error: err?.message || 'Internal server error' });
+    console.error('handler error', err);
+    const message = err?.message ?? 'Internal server error';
+    const status = message.includes('No file uploaded') || message.includes('file is empty') ? 400 : 500;
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: message }));
   }
 }
