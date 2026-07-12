@@ -1,14 +1,20 @@
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
+
 // api/analyze.ts
 // Vercel Node.js Serverless Function (Node runtime)
 // - Uses the current formidable API to parse multipart/form-data on Node
 // - Keeps the uploaded PDF entirely in memory
 // - Extracts text using pdf-parse
-// - Calls analyzeDocument(...) from server/utils/gemini.ts
+// - Calls analyzeDocument(...) from server/utils/gemini.js
 // - Returns { analysis, extractedText, fileName, pageCount }
 
 import type { IncomingMessage, ServerResponse } from 'http';
 import { PassThrough } from 'stream';
-import { formidable, File, Files } from 'formidable';
+import { formidable } from 'formidable';
 import pdfParse from 'pdf-parse';
 import { analyzeDocument } from '../server/utils/gemini.js';
 
@@ -22,12 +28,12 @@ async function parseMultipart(req: IncomingMessage): Promise<{ fileBuffer: Buffe
       maxFileSize: MAX_FILE_SIZE,
       multiples: false,
       // Use the write stream handler to collect file data in memory
-      fileWriteStreamHandler: (file: File) => {
+      fileWriteStreamHandler: (file: any) => {
         const pass = new PassThrough();
         const chunks: Buffer[] = [];
         pass.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
         pass.on('end', () => {
-          const key = file.originalFilename ?? file.newFilename ?? file.newFilename ?? 'file';
+          const key = file.originalFilename ?? file.newFilename ?? 'file';
           try {
             buffers.set(key, Buffer.concat(chunks));
           } catch (err) {
@@ -38,13 +44,13 @@ async function parseMultipart(req: IncomingMessage): Promise<{ fileBuffer: Buffe
       },
     });
 
-    form.parse(req, (err, _fields, files: Files) => {
+    form.parse(req, (err, _fields, files: any) => {
       if (err) {
         return reject(err);
       }
 
       // Prefer field named 'document', otherwise pick the first file available
-      let fileEntry: File | undefined;
+      let fileEntry: any | undefined;
 
       const documentField = files['document'];
       if (documentField) {
@@ -62,7 +68,7 @@ async function parseMultipart(req: IncomingMessage): Promise<{ fileBuffer: Buffe
         return reject(new Error('No file uploaded'));
       }
 
-      const key = fileEntry.originalFilename ?? fileEntry.newFilename ?? fileEntry.newFilename ?? 'file';
+      const key = fileEntry.originalFilename ?? fileEntry.newFilename ?? 'file';
       const buffer = buffers.get(key) ?? Array.from(buffers.values())[0];
 
       if (!buffer || buffer.length === 0) {
