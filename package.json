@@ -13,7 +13,7 @@
     "dotenv": "^17.4.2",
     "framer-motion": "^12.42.2",
     "lucide-react": "^0.344.0",
-    "formidable": "^3.6.4",
+    "formidable": "^3.5.4",
     "pdf-parse": "^1.1.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
