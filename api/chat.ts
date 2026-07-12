@@ -7,7 +7,7 @@
  * Preserves the same response shape as the previous Express controller.
  */
 
-import { chatAboutDocument } from '../server/utils/gemini';
+import { chatAboutDocument } from '../server/utils/gemini.js';
 
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') {
