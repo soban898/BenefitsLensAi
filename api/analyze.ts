@@ -8,17 +8,46 @@ export const config = {
 // Vercel Node.js Serverless Function (Node runtime)
 // - Uses the current formidable API to parse multipart/form-data on Node
 // - Keeps the uploaded PDF entirely in memory
-// - Extracts text using pdf-parse
+// - Extracts text using pdfjs-dist
 // - Calls analyzeDocument(...) from server/utils/gemini.js
 // - Returns { analysis, extractedText, fileName, pageCount }
 
 import type { IncomingMessage, ServerResponse } from 'http';
 import { PassThrough } from 'stream';
 import { formidable } from 'formidable';
-import pdfParse from 'pdf-parse';
 import { analyzeDocument } from '../server/utils/gemini.js';
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20 MB
+
+async function extractPdfText(buffer: Buffer): Promise<{ text: string; pageCount: number }> {
+  // Use the legacy build which works in Node.js
+  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.js');
+
+  // Disable workers in Node.js environment
+  const loadingTask = pdfjs.getDocument({ data: buffer, disableWorker: true });
+  const pdf = await loadingTask.promise;
+  const numPages = pdf.numPages;
+  const textParts: string[] = [];
+
+  for (let i = 1; i <= numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    const pageText = content.items.map((item: any) => (item && typeof item === 'object' && 'str' in item ? (item as any).str : String(item))).join(' ');
+    textParts.push(pageText);
+    // release page resources
+    page.cleanup?.();
+  }
+
+  // close the document
+  try {
+    pdf.cleanup?.();
+    pdf.destroy?.();
+  } catch (e) {
+    // ignore
+  }
+
+  return { text: textParts.join('\n'), pageCount: numPages };
+}
 
 async function parseMultipart(req: IncomingMessage): Promise<{ fileBuffer: Buffer; fileName: string | null }> {
   return new Promise((resolve, reject) => {
@@ -97,17 +126,17 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       return;
     }
 
-    let pdfData: any;
+    let pdfResult: { text: string; pageCount: number };
     try {
-      pdfData = await pdfParse(fileBuffer);
+      pdfResult = await extractPdfText(fileBuffer);
     } catch (err) {
-      console.error('pdf-parse error', err);
+      console.error('pdf extraction error', err);
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Failed to parse PDF. The file may be corrupted or not a valid PDF.' }));
       return;
     }
 
-    if (!pdfData?.text || String(pdfData.text).trim().length === 0) {
+    if (!pdfResult?.text || String(pdfResult.text).trim().length === 0) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'No text could be extracted from this PDF. It may be a scanned image or contain images only.' }));
       return;
@@ -115,7 +144,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
     let analysis: unknown;
     try {
-      analysis = await analyzeDocument(String(pdfData.text));
+      analysis = await analyzeDocument(String(pdfResult.text));
     } catch (err: any) {
       console.error('analyzeDocument error', err);
       if (err?.message && typeof err.message === 'string' && err.message.includes('API key')) {
@@ -130,9 +159,9 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
     const responseBody = {
       analysis,
-      extractedText: pdfData.text,
+      extractedText: pdfResult.text,
       fileName: fileName ?? null,
-      pageCount: (pdfData as any).numpages ?? 1,
+      pageCount: pdfResult.pageCount ?? 1,
     };
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
